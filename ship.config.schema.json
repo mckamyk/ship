@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ship config",
+  "description": "Configuration for the ship CLI. Lives in the root of the git repository as ship.config.json.",
+  "type": "object",
+  "required": ["deploy"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Path to this schema, so editors can validate the file."
+    },
+    "deploy": {
+      "type": "object",
+      "description": "Shell command that deploys each environment. Commands run with sh from the repository root, and a non-zero exit counts as a failed deploy.",
+      "required": ["dev", "staging", "prod"],
+      "additionalProperties": false,
+      "properties": {
+        "dev": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Deploys the checked-out ship/ or hotfix/ branch to dev."
+        },
+        "staging": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Deploys the rebuilt staging branch: latest main plus every feature on staging."
+        },
+        "prod": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Deploys main, with the feature or hotfix squash-merged onto it, to production."
+        }
+      }
+    }
+  }
+}
