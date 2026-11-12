@@ -18,11 +18,12 @@ mock.module("../src/prompts", () => ({
   log: { info() {}, success() {}, warn: (message: string) => warnings.push(message) },
 }));
 
-const { shipToDev } = await import("../src/commands/dev");
-const { shipToProd } = await import("../src/commands/prod");
-const { removeFromStaging, shipToStaging } = await import("../src/commands/staging");
+const { bringInfraToDev, pushWork, shipToDev } = await import("../src/commands/dev");
+const { pickAndShipToProd, shipToProd } = await import("../src/commands/prod");
+const { pickAndShipToStaging, removeFromStaging, shipToStaging } = await import("../src/commands/staging");
 const { startWork } = await import("../src/commands/start");
 const { commitOf, currentBranch, fetchLatest, nameProblem, stagedFeatures, workFor, workFromBranch } = await import("../src/git");
+const { missingInfra } = await import("../src/infra");
 
 let root: string;
 let failFile: string;
@@ -68,8 +69,8 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-/** Starts a feature or hotfix and commits one file to it. */
-async function start(kind: "feature" | "hotfix", name: string, file = `${name}.txt`) {
+/** Starts a piece of Work and commits one file to it. */
+async function start(kind: "feature" | "hotfix" | "infra", name: string, file = `${name}.txt`) {
   await q`git switch main`;
   answers.push(name);
   await startWork(kind);
@@ -128,6 +129,7 @@ test("reserved and already-used names are rejected across features and hotfixes"
 test("branch names are detected as features, hotfixes, or neither", () => {
   expect(workFromBranch("ship/a")?.kind).toBe("feature");
   expect(workFromBranch("hotfix/a")?.kind).toBe("hotfix");
+  expect(workFromBranch("infra/a")?.kind).toBe("infra");
   expect(workFromBranch("main")).toBeUndefined();
   expect(workFromBranch("ship/")).toBeUndefined();
 });
@@ -136,7 +138,7 @@ test("branch names are detected as features, hotfixes, or neither", () => {
 
 test("dev deploys the branch with no tags or pushes", async () => {
   await feature("wild");
-  await shipToDev("wild");
+  await shipToDev(workFor("feature", "wild"));
   expect(await lastDeploy()).toBe(`dev ${await commitOf("HEAD")}`);
   expect(await originRefs()).not.toContain("wild");
 });
@@ -196,7 +198,7 @@ test("a conflict leaves staging untouched and returns you to your branch", async
   const before = await commitOf("origin/staging");
 
   await feature("b", "same.txt");
-  answers.push("", true);
+  answers.push("", true, false); // note, confirm, decline taking a off staging
   await expect(shipToStaging("b")).rejects.toThrow("same.txt");
   expect(await currentBranch()).toBe("ship/b");
   expect(await commitOf("origin/staging")).toBe(before);
@@ -205,14 +207,74 @@ test("a conflict leaves staging untouched and returns you to your branch", async
   expect(await tempBranches()).toBe("");
 });
 
-test("a failed staging deploy adds no tag and returns you to your branch", async () => {
+test("a failed staging deploy adds no tag, leaves the staging branch alone, and returns you to your branch", async () => {
   await feature("a");
+  await toStaging("a");
+  const before = await commitOf("origin/staging");
+  await feature("b");
   writeFileSync(failFile, "");
   answers.push("", true);
-  await expect(shipToStaging("a")).rejects.toThrow("Staging deploy failed");
-  expect(await currentBranch()).toBe("ship/a");
-  expect(await commitOf("staging/a")).toBeUndefined();
+  await expect(shipToStaging("b")).rejects.toThrow("Staging deploy failed");
+  expect(await currentBranch()).toBe("ship/b");
+  expect(await commitOf("staging/b")).toBeUndefined();
+  expect(await textOf`git ls-remote origin refs/tags/staging/b`).toBe("");
+  expect(await textOf`git ls-remote origin refs/heads/staging`).toContain(before!);
+});
+
+test("another Staged Feature that conflicts can be taken off staging so the ship carries on", async () => {
+  await feature("a", "same.txt");
+  await toStaging("a");
+  await feature("b", "same.txt");
+  answers.push("", true, true); // note, confirm, take a off staging
+  await shipToStaging("b");
+
+  expect(await stagedFeatures()).toEqual(["b"]);
   expect(await textOf`git ls-remote origin refs/tags/staging/a`).toBe("");
+  expect(await commitOf("origin/ship/a")).toBeDefined();
+  expect(warnings.join()).toContain("Took a off staging");
+  expect(await tempBranches()).toBe("");
+});
+
+test("a local branch behind origin is fast-forwarded before shipping to staging", async () => {
+  await feature("a");
+  await toStaging("a");
+  const other = await cloneOther();
+  await q`git -C ${other} switch ship/a`;
+  writeFileSync(join(other, "from-elsewhere.txt"), "x\n");
+  await q`git -C ${other} add -A`;
+  await q`git -C ${other} commit -m elsewhere`;
+  await q`git -C ${other} push origin ship/a`;
+
+  await toStaging("a");
+  expect(await commitOf("ship/a")).toBe(await commitOf("origin/ship/a"));
+  expect(await commitOf("staging/a")).toBe(await commitOf("origin/ship/a"));
+  expect(await filesOn("origin/staging")).toContain("from-elsewhere.txt");
+});
+
+test("a local branch that has diverged from origin stops the ship", async () => {
+  await feature("a");
+  await toStaging("a");
+  const other = await cloneOther();
+  await q`git -C ${other} switch ship/a`;
+  await q`git -C ${other} commit --allow-empty -m theirs`;
+  await q`git -C ${other} push origin ship/a`;
+  await q`git commit --allow-empty -m mine`;
+
+  await expect(shipToStaging("a")).rejects.toThrow("diverged");
+});
+
+test("from main on another clone, a Feature on origin can be picked and shipped to staging", async () => {
+  await feature("a");
+  await pushWork(workFor("feature", "a"));
+  const tip = await commitOf("HEAD");
+  const other = await cloneOther();
+  process.chdir(other);
+
+  answers.push("a", "", true); // pick, note, confirm
+  await pickAndShipToStaging();
+  expect(await currentBranch()).toBe("main");
+  expect(await commitOf("staging/a")).toBe(tip);
+  expect(await filesOn("origin/staging")).toContain("a.txt");
 });
 
 test("declining to commit cancels a staging ship before anything happens", async () => {
@@ -259,7 +321,7 @@ test("removing a conflicting feature unblocks the feature it clashed with", asyn
   await feature("a", "same.txt");
   await toStaging("a");
   await feature("b", "same.txt");
-  answers.push("", true);
+  answers.push("", true, false);
   await expect(shipToStaging("b")).rejects.toThrow("conflicts");
 
   answers.push("a", true);
@@ -389,14 +451,32 @@ test("a conflict with main deploys nothing and restores everything", async () =>
   expect(await textOf`git status --porcelain`).toBe("");
 });
 
-test("warns when production would get code staging hasn't run", async () => {
+async function stagedThenChanged() {
   await feature("a");
   await toStaging("a");
   writeFileSync("later.txt", "later\n");
   await q`git add -A`;
   await q`git commit -m later`;
-  await toProd("a");
-  expect(warnings.join()).toContain("changed since it was deployed to staging");
+  return { staged: (await commitOf("staging/a"))!, tip: (await commitOf("HEAD"))! };
+}
+
+test("when the branch changed since staging, you can ship what staging ran and keep the newer commits", async () => {
+  const { staged, tip } = await stagedThenChanged();
+  answers.push(staged, "", true); // version, message, confirm
+  await shipToProd(workFor("feature", "a"));
+
+  expect(await filesOn("origin/main")).not.toContain("later.txt");
+  expect(await commitOf("ship/a")).toBe(tip);
+  expect(warnings.join()).toContain("Kept ship/a");
+});
+
+test("when the branch changed since staging, you can ship the latest", async () => {
+  const { tip } = await stagedThenChanged();
+  answers.push(tip, "", true);
+  await shipToProd(workFor("feature", "a"));
+
+  expect(await filesOn("origin/main")).toContain("later.txt");
+  expect(await commitOf("ship/a")).toBeUndefined();
 });
 
 test("warns when a feature skipped staging", async () => {
@@ -462,7 +542,8 @@ test("a hotfix that conflicts with staging still counts as shipped, with a warni
   await feature("a", "same.txt");
   await toStaging("a");
   await start("hotfix", "fix", "same.txt");
-  await finishHotfix("fix", true);
+  answers.push("Fix it", true, true, false); // message, confirm, rebuild, keep a on staging
+  await shipToProd(workFor("hotfix", "fix"));
 
   expect(await commitOf("prod/fix")).toBe(await commitOf("origin/main"));
   expect(warnings.join()).toContain("staging wasn't rebuilt");
@@ -478,6 +559,101 @@ test("a failed hotfix deploy returns you to the hotfix branch with main untouche
   await expect(shipToProd(workFor("hotfix", "fix"))).rejects.toThrow("Production deploy failed");
   expect(await currentBranch()).toBe("hotfix/fix");
   expect(await commitOf("main")).toBe(main);
+});
+
+test("from main on another clone, a hotfix on origin can be picked and finished", async () => {
+  await start("hotfix", "fix");
+  await pushWork(workFor("hotfix", "fix"));
+  const other = await cloneOther();
+  process.chdir(other);
+
+  answers.push("fix", "Fix it", true, false); // pick, message, confirm, no rebuild
+  await pickAndShipToProd("hotfix");
+  expect(await commitOf("prod/fix")).toBe(await commitOf("origin/main"));
+  expect(await filesOn("origin/main")).toContain("fix.txt");
+  expect(await textOf`git ls-remote origin refs/heads/hotfix/fix`).toBe("");
+});
+
+// --- infrastructure changes ---
+
+async function finishInfra(name: string, rebuildStaging: boolean) {
+  answers.push(`Add ${name}`, true, rebuildStaging);
+  await shipToProd(workFor("infra", name));
+}
+
+test("an infrastructure change goes straight to production and is recorded there", async () => {
+  await start("infra", "vpc");
+  expect(await currentBranch()).toBe("infra/vpc");
+  await finishInfra("vpc", false);
+
+  const head = await commitOf("origin/main");
+  expect(await commitOf("prod/vpc")).toBe(head);
+  expect(await commitOf("infra/prod/vpc")).toBe(head);
+  expect(await textOf`git ls-remote origin refs/tags/infra/prod/vpc`).not.toBe("");
+  expect(await textOf`git cat-file -p prod/vpc`).toContain("(infra)");
+  expect(await commitOf("infra/vpc")).toBeUndefined();
+  expect(warnings).toEqual([]);
+  expect(await missingInfra("dev")).toEqual(["vpc"]);
+  expect(await missingInfra("staging")).toEqual(["vpc"]);
+});
+
+test("rebuilding staging records the infrastructure it now has", async () => {
+  await feature("a");
+  await toStaging("a");
+  await start("infra", "vpc");
+  await finishInfra("vpc", true);
+
+  expect(await missingInfra("staging")).toEqual([]);
+  expect(await textOf`git ls-remote origin refs/tags/infra/staging/vpc`).not.toBe("");
+  expect(await stagedFeatures()).toEqual(["a"]);
+});
+
+test("an unfinished infra branch deployed to dev isn't recorded there", async () => {
+  await start("infra", "vpc");
+  await shipToDev(workFor("infra", "vpc"));
+  expect(await commitOf("infra/dev/vpc")).toBeUndefined();
+});
+
+/** An old feature from before `vpc`, then `vpc` finished and deployed to dev by a newer feature. */
+async function devHasInfraOldBranchLacks() {
+  await feature("old");
+  await start("infra", "vpc");
+  await finishInfra("vpc", false);
+  await feature("new");
+  await shipToDev(workFor("feature", "new"));
+  expect(await missingInfra("dev")).toEqual([]);
+  await q`git switch ship/old`;
+}
+
+test("deploying a branch to dev that lacks dev's infrastructure offers to merge main first", async () => {
+  await devHasInfraOldBranchLacks();
+  answers.push(true);
+  await shipToDev(workFor("feature", "old"));
+
+  expect(await filesOn("HEAD")).toContain("vpc.txt");
+  expect(await lastDeploy()).toBe(`dev ${await commitOf("HEAD")}`);
+  expect(await missingInfra("dev")).toEqual([]);
+});
+
+test("declining the merge rolls the infrastructure back on dev and removes its record", async () => {
+  await devHasInfraOldBranchLacks();
+  answers.push(false);
+  await shipToDev(workFor("feature", "old"));
+
+  expect(await filesOn("HEAD")).not.toContain("vpc.txt");
+  expect(await missingInfra("dev")).toEqual(["vpc"]);
+  expect(await textOf`git ls-remote origin refs/tags/infra/dev/vpc`).toBe("");
+});
+
+test("missing infrastructure can be brought to dev from a feature branch", async () => {
+  await feature("old");
+  await start("infra", "vpc");
+  await finishInfra("vpc", false);
+  await q`git switch ship/old`;
+
+  await bringInfraToDev(["vpc"]);
+  expect(await filesOn("HEAD")).toContain("vpc.txt");
+  expect(await missingInfra("dev")).toEqual([]);
 });
 
 // --- bun.lock conflicts ---

@@ -1,0 +1,3 @@
+# bun.lock conflicts are resolved automatically, separately for Staging and Production
+
+Two branches that change dependencies always conflict in `bun.lock`. When that's the only conflicting file, ship keeps our side and lets `bun install` add what's missing. This happens independently each time Staging is rebuilt and each time Work is squash-merged for Production. Incoming dependencies get the newest version their range allows, so Production can run dependency versions that Staging or the branch itself never ran. We accept that rare risk because it beats making someone resolve a lockfile by hand every time two pieces of Work touch dependencies.

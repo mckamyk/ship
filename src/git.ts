@@ -1,4 +1,5 @@
 import { $ } from "bun";
+import type { Environment } from "./deploy";
 import { Cancelled, confirm, log, text } from "./prompts";
 
 export const MAIN = "main";
@@ -11,24 +12,30 @@ const LOCKFILE = "bun.lock";
 const WORK_NAME = /^[a-z0-9][a-z0-9-]*$/;
 const RESERVED_NAMES = new Set(["latest"]);
 
-export type WorkKind = "feature" | "hotfix";
+export type WorkKind = "feature" | "hotfix" | "infra";
+export const WORK_KINDS: readonly WorkKind[] = ["feature", "hotfix", "infra"];
 
-/** A unit of work, identified by its branch: `ship/<name>` for features, `hotfix/<name>` for hotfixes. */
+/** What people call each kind, matching GLOSSARY.md. */
+export const KIND_LABELS: Record<WorkKind, string> = { feature: "Feature", hotfix: "Hotfix", infra: "Infrastructure Change" };
+
+/** A unit of Work, identified by its branch: `ship/<name>`, `hotfix/<name>` or `infra/<name>`. */
 export interface Work {
   kind: WorkKind;
   name: string;
   branch: string;
 }
 
-const PREFIXES: Record<WorkKind, string> = { feature: "ship/", hotfix: "hotfix/" };
+const PREFIXES: Record<WorkKind, string> = { feature: "ship/", hotfix: "hotfix/", infra: "infra/" };
 
 export const workFor = (kind: WorkKind, name: string): Work => ({ kind, name, branch: `${PREFIXES[kind]}${name}` });
 export const stagingTag = (name: string) => `staging/${name}`;
 export const prodTag = (name: string) => `prod/${name}`;
+/** Records that an Infrastructure Change has reached an Environment. Points at the change's commit on main. */
+export const infraTag = (env: Environment, name: string) => `infra/${env}/${name}`;
 
 /** Works out what a branch is from its name. Undefined for branches ship didn't create. */
 export function workFromBranch(branch: string): Work | undefined {
-  for (const kind of ["feature", "hotfix"] as const) {
+  for (const kind of WORK_KINDS) {
     const prefix = PREFIXES[kind];
     const name = branch.slice(prefix.length);
     if (branch.startsWith(prefix) && WORK_NAME.test(name)) return workFor(kind, name);
@@ -55,7 +62,8 @@ const toLines = (output: string) => output.split("\n").filter(Boolean);
 
 /** Fetches branches and ship's tags. Forcing and pruning brings in tags other people moved or deleted. */
 export async function fetchLatest(): Promise<void> {
-  const refspecs = ["+refs/heads/*:refs/remotes/origin/*", "+refs/tags/staging/*:refs/tags/staging/*", "+refs/tags/prod/*:refs/tags/prod/*"];
+  const refspecs = ["+refs/heads/*:refs/remotes/origin/*"];
+  for (const folder of ["staging", "prod", "infra"]) refspecs.push(`+refs/tags/${folder}/*:refs/tags/${folder}/*`);
   await sh`git fetch --prune origin ${refspecs}`;
 }
 
@@ -83,11 +91,32 @@ export function slugify(input: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-/** Why new work can't use this name, or undefined if it can. Features and hotfixes share one set of names. */
+/** Whether `ancestor` is part of `commit`'s history. */
+export async function contains(commit: string, ancestor: string): Promise<boolean> {
+  return (await sh`git merge-base --is-ancestor ${ancestor} ${commit}`.nothrow()).exitCode === 0;
+}
+
+/**
+ * Fast-forwards the checked-out branch to origin when it's strictly behind, which is common on a
+ * shared VM where the branch was pushed from somewhere else. Stops if the two have diverged.
+ */
+export async function catchUpWithOrigin(branch: string): Promise<void> {
+  const local = await commitOf(branch);
+  const remote = await commitOf(`origin/${branch}`);
+  if (!local || !remote || local === remote || (await contains(local, remote))) return;
+  if (!(await contains(remote, local))) {
+    throw new ShipError(`${branch} and origin/${branch} have diverged. Pull or rebase so they agree, then ship again.`);
+  }
+  const forward = await sh`git merge --ff-only ${remote}`.nothrow();
+  if (forward.exitCode !== 0) throw new ShipError(`Couldn't bring ${branch} up to date with origin.\n${forward.stderr}`);
+  log.info(`Brought ${branch} up to date with origin.`);
+}
+
+/** Why new Work can't use this name, or undefined if it can. All kinds of Work share one set of names. */
 export async function nameProblem(name: string): Promise<string | undefined> {
   if (!WORK_NAME.test(name)) return "Use letters, numbers and hyphens.";
   if (RESERVED_NAMES.has(name)) return `"${name}" is reserved. Pick another name.`;
-  for (const kind of ["feature", "hotfix"] as const) {
+  for (const kind of WORK_KINDS) {
     const { branch } = workFor(kind, name);
     if ((await commitOf(branch)) || (await commitOf(`origin/${branch}`))) return `${branch} already exists.`;
   }
@@ -101,11 +130,37 @@ export async function stagedFeatures(): Promise<string[]> {
   return toLines(await out`git for-each-ref --sort=creatordate ${format} refs/tags/staging/`);
 }
 
-/** Features that could go to production from a list: staged ones plus any ship branch on origin. */
-export async function prodCandidates(): Promise<string[]> {
+/** Names of the Work of one kind that has a branch on origin. */
+export async function workOnOrigin(kind: WorkKind): Promise<string[]> {
   const format = "--format=%(refname:lstrip=4)";
-  const branches = toLines(await out`git for-each-ref ${format} refs/remotes/origin/ship/`);
-  return [...new Set([...(await stagedFeatures()), ...branches])];
+  const folder = `refs/remotes/origin/${PREFIXES[kind]}`;
+  return toLines(await out`git for-each-ref ${format} ${folder}`).filter((name) => WORK_NAME.test(name));
+}
+
+/** Work that could go to production from a list. For Features, staged ones plus any ship branch on origin. */
+export async function prodCandidates(kind: WorkKind = "feature"): Promise<string[]> {
+  if (kind !== "feature") return workOnOrigin(kind);
+  return [...new Set([...(await stagedFeatures()), ...(await workOnOrigin("feature"))])];
+}
+
+/**
+ * Merges the latest main into the checked-out branch, resolving a bun.lock-only conflict.
+ * On any other conflict the merge is undone and this throws.
+ */
+export async function mergeLatestMain(branch: string): Promise<void> {
+  const message = `Merge ${ORIGIN_MAIN} into ${branch}`;
+  const merge = await sh`git merge --no-edit -m ${message} ${ORIGIN_MAIN}`.nothrow();
+  if (merge.exitCode === 0) return;
+  if (await resolveLockfileConflict()) {
+    await sh`git commit --no-edit`;
+    return;
+  }
+  const files = await conflictedFiles();
+  await sh`git merge --abort`.nothrow();
+  throw new ShipError(
+    `${branch} conflicts with ${MAIN}, so nothing was deployed. Merge ${MAIN} into it by hand, then ship again.\n` +
+      (files.length ? `Conflicting files:\n  ${files.join("\n  ")}` : `${merge.stderr}`),
+  );
 }
 
 /** Offers to commit everything uncommitted. If `required`, declining cancels the whole ship. */

@@ -19,7 +19,7 @@
         "dev": {
           "type": "string",
           "minLength": 1,
-          "description": "Deploys the checked-out ship/ or hotfix/ branch to dev."
+          "description": "Deploys the checked-out ship/, hotfix/ or infra/ branch to dev."
         },
         "staging": {
           "type": "string",
@@ -29,7 +29,7 @@
         "prod": {
           "type": "string",
           "minLength": 1,
-          "description": "Deploys main, with the feature or hotfix squash-merged onto it, to production."
+          "description": "Deploys main, with the Work squash-merged onto it, to production."
         }
       }
     }

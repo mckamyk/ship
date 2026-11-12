@@ -1,10 +1,11 @@
-import { fetchLatest, MAIN, nameProblem, ORIGIN_MAIN, sh, ShipError, slugify, workFor, type WorkKind } from "../git";
+import { fetchLatest, KIND_LABELS, MAIN, nameProblem, ORIGIN_MAIN, sh, ShipError, slugify, workFor, type WorkKind } from "../git";
 import { log, text } from "../prompts";
 
-/** Creates `ship/<name>` or `hotfix/<name>` from the latest main. */
+const PLACEHOLDERS: Record<WorkKind, string> = { feature: "checkout-flow", hotfix: "fix-login", infra: "split-vpc" };
+
+/** Creates `ship/<name>`, `hotfix/<name>` or `infra/<name>` from the latest main. */
 export async function startWork(kind: WorkKind): Promise<void> {
-  const label = kind === "hotfix" ? "Hotfix name" : "Feature name";
-  const name = slugify(await text(label, { placeholder: kind === "hotfix" ? "fix-login" : "checkout-flow" }));
+  const name = slugify(await text(`${KIND_LABELS[kind]} name`, { placeholder: PLACEHOLDERS[kind] }));
   const problem = await nameProblem(name);
   if (problem) throw new ShipError(problem);
 

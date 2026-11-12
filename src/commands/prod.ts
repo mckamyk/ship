@@ -1,10 +1,13 @@
 import { deploy } from "../deploy";
 import {
+  catchUpWithOrigin,
   commitOf,
   commitWork,
   conflictedFiles,
+  contains,
   currentBranch,
   fetchLatest,
+  KIND_LABELS,
   MAIN,
   ORIGIN_MAIN,
   out,
@@ -19,19 +22,22 @@ import {
   stagingTag,
   workFor,
   type Work,
+  type WorkKind,
 } from "../git";
+import { markInfraInProd } from "../infra";
 import { Cancelled, confirm, log, select, text } from "../prompts";
 import { rebuildStaging, stagedCommits } from "./staging";
 
-/** Ships a feature picked from a list, for when you aren't on its branch. */
-export async function pickAndShipToProd(): Promise<void> {
+/** Ships Work picked from a list, for when you aren't on its branch (e.g. on the deploy VM). */
+export async function pickAndShipToProd(kind: WorkKind = "feature"): Promise<void> {
   await requireCleanTree();
   const choices = [];
-  for (const name of await prodCandidates()) {
-    const hint = (await commitOf(stagingTag(name))) ? "on staging" : "not on staging";
+  for (const name of await prodCandidates(kind)) {
+    const hint = kind !== "feature" ? undefined : (await commitOf(stagingTag(name))) ? "on staging" : "not on staging";
     choices.push({ value: name, label: name, hint });
   }
-  await shipToProd(workFor("feature", await select("Which feature?", choices)));
+  if (!choices.length) throw new ShipError(`No ${KIND_LABELS[kind]} branches on origin to ship.`);
+  await shipToProd(workFor(kind, await select(`Which ${KIND_LABELS[kind]}?`, choices)));
 }
 
 /**
@@ -43,19 +49,19 @@ export async function shipToProd(work: Work): Promise<void> {
   const startingBranch = await currentBranch();
   const onBranch = startingBranch === branch;
 
-  if (onBranch) {
-    await commitWork({ required: true });
-  } else {
-    await requireCleanTree();
-  }
+  if (!onBranch) await requireCleanTree();
   await fetchLatest();
+  if (onBranch) {
+    await catchUpWithOrigin(branch);
+    await commitWork({ required: true });
+  }
 
-  const target = onBranch
+  const tip = onBranch
     ? await commitOf("HEAD")
     : ((await commitOf(`origin/${branch}`)) ?? (await commitOf(stagingTag(name))) ?? (await commitOf(branch)));
-  if (!target) throw new ShipError(`Can't find a branch or staging tag for ${name}.`);
-  // Hotfixes skip staging on purpose, so these warnings only apply to features.
-  if (kind === "feature") await warnIfNotTested(work, target);
+  if (!tip) throw new ShipError(`Can't find a branch or staging tag for ${name}.`);
+  // Hotfixes and Infrastructure Changes skip staging on purpose, so only Features are checked.
+  const target = kind === "feature" ? await chooseVersion(work, tip) : tip;
 
   const subject = (await text("Commit message for main", { placeholder: name })).trim() || name;
   if (!(await confirm(`Squash-merge ${name} into ${MAIN} and deploy to production?`))) throw new Cancelled();
@@ -73,30 +79,48 @@ export async function shipToProd(work: Work): Promise<void> {
     throw error;
   }
 
-  await recordProdDeploy(work, subject);
+  await recordProdDeploy(work, subject, target);
   log.success(`${name} is deployed to production. You're on ${MAIN}.`);
-  if (kind === "hotfix") await offerStagingRebuild();
+  if (kind !== "feature") await offerStagingRebuild(name);
 }
 
-async function warnIfNotTested({ name, branch }: Work, target: string): Promise<void> {
-  const stagedCommit = await commitOf(stagingTag(name));
-  if (!stagedCommit) {
+/**
+ * Picks which commit of a Feature goes to production. If it was staged at a different commit than
+ * its latest, you choose, with the latest first.
+ */
+async function chooseVersion({ name, branch }: Work, tip: string): Promise<string> {
+  const staged = await commitOf(stagingTag(name));
+  if (!staged) {
     log.warn(`${name} has never been deployed to staging.`);
-  } else if (stagedCommit !== target) {
-    log.warn(`${branch} has changed since it was deployed to staging, so production would get code staging hasn't run.`);
+    return tip;
   }
+  if (staged === tip) return tip;
+  return select(`${branch} has changed since it was deployed to staging. Which version should go to production?`, [
+    { value: tip, label: "The latest", hint: `${tip.slice(0, 8)}, which staging hasn't run` },
+    { value: staged, label: "What staging ran", hint: `${staged.slice(0, 8)}, leaving the newer commits on the branch` },
+  ]);
 }
 
-/** Pushes main and the prod tags, and removes the staging tag and branch. All or nothing on origin. */
-async function recordProdDeploy({ kind, name, branch }: Work, subject: string): Promise<void> {
+const KIND_SUFFIX: Record<WorkKind, string> = { feature: "", hotfix: " (hotfix)", infra: " (infra)" };
+
+/**
+ * Pushes main and the prod tags, and removes the staging tag and branch. All or nothing on origin.
+ * The branch is kept if it has commits that weren't shipped, so they aren't lost.
+ */
+async function recordProdDeploy({ kind, name, branch }: Work, subject: string, shipped: string): Promise<void> {
   const head = await out`git rev-parse HEAD`;
-  const heading = `${name}${kind === "hotfix" ? " (hotfix)" : ""} deployed to prod`;
+  const heading = `${name}${KIND_SUFFIX[kind]} deployed to prod`;
   await setTag(PROD_LATEST, head, heading, subject);
   await setTag(prodTag(name), head, heading, subject);
 
   const refspecs = [MAIN, `+refs/tags/${PROD_LATEST}`, `+refs/tags/${prodTag(name)}`];
+  if (kind === "infra") refspecs.push(await markInfraInProd(name, head, heading));
   if (await commitOf(stagingTag(name))) refspecs.push(`:refs/tags/${stagingTag(name)}`);
-  if (await commitOf(`origin/${branch}`)) refspecs.push(`:refs/heads/${branch}`);
+  const originTip = await commitOf(`origin/${branch}`);
+  const localTip = await commitOf(branch);
+  const unshipped = async (tip?: string) => Boolean(tip) && !(await contains(shipped, tip!));
+  const keepBranch = (await unshipped(originTip)) || (await unshipped(localTip));
+  if (originTip && !keepBranch) refspecs.push(`:refs/heads/${branch}`);
 
   const push = await sh`git push --atomic origin ${refspecs}`.nothrow();
   if (push.exitCode !== 0) {
@@ -107,19 +131,23 @@ async function recordProdDeploy({ kind, name, branch }: Work, subject: string): 
   }
 
   await sh`git tag -d ${stagingTag(name)}`.nothrow();
-  await sh`git branch -D ${branch}`.nothrow();
+  if (keepBranch) {
+    log.warn(`Kept ${branch} because it has commits that weren't shipped.`);
+  } else {
+    await sh`git branch -D ${branch}`.nothrow();
+  }
   await fetchLatest();
 }
 
-/** A hotfix goes around staging, so staging lacks it until it's rebuilt from the new main. */
-async function offerStagingRebuild(): Promise<void> {
-  if (!(await confirm("Rebuild staging so it includes this hotfix?"))) return;
+/** Hotfixes and Infrastructure Changes go around staging, so staging lacks them until it's rebuilt from the new main. */
+async function offerStagingRebuild(name: string): Promise<void> {
+  if (!(await confirm(`Rebuild staging so it includes ${name}?`))) return;
   try {
     await rebuildStaging(await stagedCommits());
-    log.success("Staging now includes the hotfix.");
+    log.success(`Staging now includes ${name}.`);
   } catch (error) {
     if (!(error instanceof ShipError)) throw error;
-    log.warn(`The hotfix is in production, but staging wasn't rebuilt.\n${error.message}`);
+    log.warn(`${name} is in production, but staging wasn't rebuilt.\n${error.message}`);
   }
 }
 

@@ -1,0 +1,3 @@
+# Infrastructure Changes bake behind Feature Flags on main, not on Staging
+
+Infrastructure Changes often need weeks of baking in lower environments, and they need to land in steps. A Staged Feature that stays on Staging that long falls behind `main` and starts conflicting, which blocks everyone's staging ships. So an Infrastructure Change takes the Hotfix path straight to `main` and Production, behind a Feature Flag (Pulumi config) that is switched on in Dev and Staging first and in Production last. It's still its own kind of Work, so it can be told apart from urgent fixes. Ship doesn't manage the flags.
