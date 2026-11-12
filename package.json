@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "bin": {
-    "ship-cli": "src/cli.ts"
+    "ship": "src/cli.ts"
   },
   "scripts": {
     "ship": "bun src/cli.ts",

@@ -764,3 +764,15 @@ test("another clone sees tag moves and deletions, and keeps unrelated tags", asy
   expect(await commitOf("prod/a")).toBeDefined();
   expect(await commitOf("my-own-tag")).toBeDefined();
 });
+
+test("the global lockfile gives the requested branch and the installed commit, only for GitHub installs", async () => {
+  const { parseGlobalLock } = await import("../src/update");
+  const lock = `{
+  "workspaces": { "": { "dependencies": { "ship-cli": "github:mckamyk/ship#main", }, }, },
+  "packages": {
+    "ship-cli": ["ship-cli@github:mckamyk/ship#e9d836a", { "bin": { "ship-cli": "src/cli.ts" } }, "mckamyk-ship-e9d836a", "sha512-x"],
+  }
+}`;
+  expect(parseGlobalLock(lock)).toEqual({ repo: "mckamyk/ship", ref: "main", commit: "e9d836a" });
+  expect(parseGlobalLock(`{ "packages": { "ship-cli": ["ship-cli@0.1.0", "", {}, "sha512-x"] } }`)).toBeUndefined();
+});

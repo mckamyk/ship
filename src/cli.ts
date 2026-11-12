@@ -22,6 +22,7 @@ import {
 } from "./git";
 import { missingInfra } from "./infra";
 import { Cancelled, select, type Choice } from "./prompts";
+import { updateAndRelaunch } from "./update";
 
 type Run = () => Promise<void>;
 
@@ -128,4 +129,4 @@ async function main(): Promise<number> {
   }
 }
 
-process.exit(await main());
+process.exit((await updateAndRelaunch()) ?? (await main()));

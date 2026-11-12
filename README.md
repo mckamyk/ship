@@ -16,10 +16,10 @@ The recording takes one Feature from `main` through Dev, Staging and Production 
 
 ```sh
 bun add -g github:mckamyk/ship#main
-ship-cli
+ship
 ```
 
-Run `ship-cli` from inside the repo you're shipping, which needs its own `ship.config.json`. See [Installing globally from GitHub](#installing-globally-from-github) for upgrading and pinning, or [Setup](#setup) to add it to a monorepo instead.
+Run `ship` from inside the repo you're shipping, which needs its own `ship.config.json`. See [Installing globally from GitHub](#installing-globally-from-github) for upgrading and pinning, or [Setup](#setup) to add it to a monorepo instead.
 
 ## Setup
 
@@ -68,12 +68,14 @@ Instead of copying it into `packages/ship`, you can install it straight from Git
 
 ```sh
 bun add -g github:mckamyk/ship#main
-ship-cli
+ship
 ```
 
-Bun's global bin is `~/.bun/bin`, and it must be on your `PATH`. Run `ship-cli` from anywhere inside the repo you're shipping. That repo still needs its own `ship.config.json`, and you can point `$schema` at `https://raw.githubusercontent.com/mckamyk/ship/main/ship.config.schema.json`.
+Bun's global bin is `~/.bun/bin`, and it must be on your `PATH`. Run `ship` from anywhere inside the repo you're shipping. That repo still needs its own `ship.config.json`, and you can point `$schema` at `https://raw.githubusercontent.com/mckamyk/ship/main/ship.config.schema.json`.
 
-To upgrade to the latest `main`, run `bun update -g ship-cli`. **Keep the `#main` in the install command.** Without a ref, Bun pins the commit it first installed, and neither `bun update -g`, `bun add -g --force` nor removing and reinstalling will move it. To pin a version instead, put a commit SHA or a pushed tag after the `#`, such as `github:mckamyk/ship#444e6c1`. To uninstall, run `bun remove -g ship-cli`.
+**It keeps itself up to date.** On startup, at most once an hour, a global install that tracks a branch asks GitHub for that branch's latest commit. If it's newer than the installed one, ship runs `bun update -g ship-cli` and restarts on the new version. If GitHub can't be reached in 5 seconds, or the update fails, it prints a warning and carries on with the installed version. Installs pinned to a commit or tag, and copies in a monorepo or checkout, skip the check. The time of the last check is kept in `~/.cache/ship-cli/last-update-check`; delete it to check on the next run, or set `SHIP_SKIP_UPDATE_CHECK=1` to skip the check for one run.
+
+To upgrade by hand, run `bun update -g ship-cli`. **Keep the `#main` in the install command.** Without a ref, Bun pins the commit it first installed, and neither `bun update -g`, `bun add -g --force` nor removing and reinstalling will move it. To pin a version instead, put a commit SHA or a pushed tag after the `#`, such as `github:mckamyk/ship#444e6c1`. To uninstall, run `bun remove -g ship-cli`.
 
 A global install runs the version you installed, not the code on your current branch, so the note below about the CLI's own code doesn't apply to it.
 
@@ -83,7 +85,7 @@ A global install runs the version you installed, not the code on your current br
 |---|---|
 | Repo root | `bun ship` |
 | `packages/ship` | `bun ship` |
-| Any other package | `bunx ship-cli`, if the root has `"devDependencies": { "ship-cli": "workspace:*" }` |
+| Any other package | `bun ship`, if the root has `"devDependencies": { "ship-cli": "workspace:*" }` |
 
 Wherever you start it, the CLI works from the repo root. That means:
 
