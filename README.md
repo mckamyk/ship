@@ -8,6 +8,19 @@ An interactive CLI for moving Work through Dev, Staging and Production. Run `bun
 
 The words used here are defined in [GLOSSARY.md](GLOSSARY.md), and the decisions behind the design are in [docs/adr](docs/adr).
 
+![ship taking a Feature from start to Production](docs/demo/ship-demo.gif)
+
+The recording takes one Feature from `main` through Dev, Staging and Production in a sandbox repo, with a stand-in deploy command ([MP4 version](docs/demo/ship-demo.mp4)).
+
+## Quick install
+
+```sh
+bun add -g github:mckamyk/ship#main
+ship-cli
+```
+
+Run `ship-cli` from inside the repo you're shipping, which needs its own `ship.config.json`. See [Installing globally from GitHub](#installing-globally-from-github) for upgrading and pinning, or [Setup](#setup) to add it to a monorepo instead.
+
 ## Setup
 
 This is designed to live in a Bun monorepo at `packages/ship`. When copying it in, leave out `.git`, `node_modules` and `bun.lock`, because the workspace's root lockfile takes over.
@@ -121,12 +134,18 @@ Because a deploy applies the infrastructure in the commit being deployed, ship k
 
 ## Tags
 
+![Where ship's tags point after a Feature and an Infrastructure Change reach Production](docs/diagrams/tags-graph.svg)
+
 | Tag | Points at | Lifetime |
 |---|---|---|
 | `staging/<name>` | The feature commit that was deployed | Moves on each staging ship, deleted on reaching production or when removed |
 | `prod/latest` | The Last Production Deploy: the `main` commit ship last deployed. A manual deploy can mean Production runs something else | Moves on each production deploy |
 | `prod/<name>` | That Work's commit on `main` | Permanent |
 | `infra/<env>/<name>` | That Infrastructure Change's commit on `main`, meaning the Environment has it | `infra/prod/<name>` is permanent. Dev and Staging ones are added and removed as deploys include or roll back the change |
+
+Here is how the tags change over a run of shipping. A tag only changes once its deploy has succeeded.
+
+![How ship creates, moves and deletes tags over an example run](docs/diagrams/tags-lifecycle.svg)
 
 Tags are annotated, so `git show staging/<name>` displays the note, who deployed it and when.
 
@@ -156,4 +175,11 @@ Git commands use [Bun Shell](https://bun.sh/docs/runtime/shell) through the `sh`
 ```sh
 bun test           # real git repos in a temp folder, with prompts mocked
 bun run typecheck
+```
+
+The README demo and diagrams are generated, so edit their sources rather than the output files:
+
+```sh
+vhs docs/demo/demo.tape              # re-records docs/demo/ship-demo.{gif,mp4}; needs vhs, ttyd and ffmpeg
+python3 docs/diagrams/generate.py    # rewrites the tag diagrams in docs/diagrams
 ```
