@@ -49,6 +49,21 @@ Ship doesn't know which network it's in. It offers everything, and a deploy to a
 
 If you are on a Work branch whose local copy is behind origin, ship fast-forwards it first, and stops if the two have diverged.
 
+## Installing globally from GitHub
+
+Instead of copying it into `packages/ship`, you can install it straight from GitHub into Bun's global bin. It isn't published to npm.
+
+```sh
+bun add -g github:mckamyk/ship#main
+ship-cli
+```
+
+Bun's global bin is `~/.bun/bin`, and it must be on your `PATH`. Run `ship-cli` from anywhere inside the repo you're shipping. That repo still needs its own `ship.config.json`, and you can point `$schema` at `https://raw.githubusercontent.com/mckamyk/ship/main/ship.config.schema.json`.
+
+To upgrade to the latest `main`, run `bun update -g ship-cli`. **Keep the `#main` in the install command.** Without a ref, Bun pins the commit it first installed, and neither `bun update -g`, `bun add -g --force` nor removing and reinstalling will move it. To pin a version instead, put a commit SHA or a pushed tag after the `#`, such as `github:mckamyk/ship#444e6c1`. To uninstall, run `bun remove -g ship-cli`.
+
+A global install runs the version you installed, not the code on your current branch, so the note below about the CLI's own code doesn't apply to it.
+
 ## Running it in a monorepo
 
 | Where you are | Command |
